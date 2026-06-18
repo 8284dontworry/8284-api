@@ -1,6 +1,6 @@
 // api/calculate.js
 // 8284 Don't Worry — 한국 전체 쇼핑몰 가격+무게 자동 계산 API
-// ✏️ 배송비 정책 변경 시 CONFIG만 수정하세요
+// 🖊 배송비 정책 변경 시 CONFIG만 수정하세요
 
 const CONFIG = {
   shippingPerKg: 12000,  // KG당 배송비 (원)
@@ -23,222 +23,244 @@ const CATEGORY_WEIGHT = {
 
 // 쇼핑몰 감지
 function detectMall(url) {
-  if (url.includes('oliveyoung'))   return 'oliveyoung';
-  if (url.includes('coupang'))      return 'coupang';
-  if (url.includes('musinsa'))      return 'musinsa';
-  if (url.includes('kurly'))        return 'kurly';
-  if (url.includes('zigzag'))       return 'zigzag';
-  if (url.includes('ably'))         return 'ably';
-  if (url.includes('29cm'))         return '29cm';
-  if (url.includes('gmarket'))      return 'gmarket';
-  if (url.includes('auction'))      return 'auction';
-  if (url.includes('11st'))         return '11st';
-  if (url.includes('smartstore') || url.includes('shopping.naver')) return 'naver';
-  if (url.includes('daiso'))        return 'daiso';
-  return 'other';
+  if (url.includes('oliveyoung'))  return 'oliveyoung';
+  if (url.includes('coupang'))     return 'coupang';
+  if (url.includes('musinsa'))     return 'musinsa';
+  if (url.includes('kurly'))       return 'kurly';
+  if (url.includes('zigzag'))      return 'zigzag';
+  if (url.includes('ably'))        return 'ably';
+  if (url.includes('29cm'))        return '29cm';
+  if (url.includes('daiso'))       return 'daiso';
+  if (url.includes('naver'))       return 'naver';
+  return 'unknown';
 }
 
-// JSON-LD 구조화 데이터에서 가격 추출 (가장 신뢰성 높음)
-function extractFromJsonLd(html) {
-  const ldMatches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi) || [];
-  for (const block of ldMatches) {
-    try {
-      const json = JSON.parse(block.replace(/<script[^>]*>|<\/script>/gi, ''));
-      const items = Array.isArray(json) ? json : [json];
-      for (const item of items) {
-        const product = item['@type'] === 'Product' ? item
-          : item['@graph']?.find(i => i['@type'] === 'Product');
-        if (!product) continue;
-        const name  = product.name || '';
-        const price = product.offers?.price || product.offers?.[0]?.price || 0;
-        const image = product.image?.[0] || product.image || '';
-        if (name && price) return { name, price: parseInt(String(price).replace(/[^0-9]/g,'')), image };
+// 올리브영 내부 API로 상품 정보 가져오기
+async function fetchOliveyoung(url) {
+  try {
+    // goodsNo 추출
+    const match = url.match(/goodsNo=([A-Z0-9]+)/i);
+    if (!match) throw new Error('goodsNo not found');
+    const goodsNo = match[1];
+
+    // 올리브영 상품 상세 API 호출
+    const apiUrl = `https://www.oliveyoung.co.kr/store/ajax/getGoodsAjax.do?goodsNo=${goodsNo}`;
+    const res = await fetch(apiUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.oliveyoung.co.kr/',
+        'Accept': 'application/json, text/javascript, */*',
+        'X-Requested-With': 'XMLHttpRequest',
       }
-    } catch (_) {}
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    // 응답 파싱
+    const goods = data?.goodsDetail || data?.result || data;
+    const name = goods?.goodsNm || goods?.goodsName || goods?.name || null;
+    const price = parseInt(goods?.price || goods?.goodsPrice || goods?.salePrice || 0);
+    const image = goods?.imageUrl || goods?.goodsImgUrl || goods?.mainImageUrl || null;
+    const weightG = parseInt(goods?.weight || goods?.netWeight || 0) || null;
+
+    if (!name && !price) throw new Error('parse failed');
+
+    return { name, price, image, weightG, source: 'oliveyoung-api' };
+  } catch(e) {
+    // API 실패시 페이지 직접 크롤링 시도
+    return await fetchOliveyoungPage(url);
   }
-  return null;
 }
 
-// OG 메타 태그 추출 (범용)
-function extractOgMeta(html) {
-  const title = (html.match(/property="og:title"\s+content="([^"]+)"/i) || [])[1] || '';
-  const image = (html.match(/property="og:image"\s+content="([^"]+)"/i) || [])[1] || '';
-  const price = (html.match(/property="(?:og:price:amount|product:price:amount)"\s+content="([^"]+)"/i) || [])[1] || '';
-  return { title: title.trim(), image, price: parseInt(price.replace(/[^0-9]/g,'')) || 0 };
+// 올리브영 페이지 직접 크롤링 (fallback)
+async function fetchOliveyoungPage(url) {
+  try {
+    const match = url.match(/goodsNo=([A-Z0-9]+)/i);
+    const goodsNo = match ? match[1] : null;
+
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+        'Accept-Language': 'ko-KR,ko;q=0.9',
+        'Referer': 'https://www.oliveyoung.co.kr/',
+      }
+    });
+
+    const html = await res.text();
+
+    // 상품명 추출
+    let name = null;
+    const nameMatch = html.match(/"goodsNm"\s*:\s*"([^"]+)"/) ||
+                      html.match(/class="prd-name"[^>]*>\s*<[^>]+>\s*([^<]+)/) ||
+                      html.match(/<title>([^|<]+)/);
+    if (nameMatch) name = nameMatch[1].trim();
+
+    // 가격 추출
+    let price = 0;
+    const priceMatch = html.match(/"price"\s*:\s*"?(\d+)"?/) ||
+                       html.match(/class="price-1"[^>]*>[\s\S]*?(\d[\d,]+)원/) ||
+                       html.match(/finalPrice['"]\s*:\s*(\d+)/);
+    if (priceMatch) price = parseInt(priceMatch[1].replace(/,/g, ''));
+
+    // 이미지 추출
+    let image = null;
+    const imgMatch = html.match(/"mainImageUrl"\s*:\s*"([^"]+)"/) ||
+                     html.match(/id="mainImg"[^>]*src="([^"]+)"/);
+    if (imgMatch) image = imgMatch[1];
+
+    // 무게 추출
+    let weightG = null;
+    const weightMatch = html.match(/내용량[^>]*>[\s\S]*?(\d+(?:\.\d+)?)\s*(ml|g|ML|G)/i);
+    if (weightMatch) weightG = parseFloat(weightMatch[1]);
+
+    return { name, price, image, weightG, source: 'oliveyoung-page', goodsNo };
+  } catch(e) {
+    return { name: null, price: 0, image: null, weightG: null, source: 'failed' };
+  }
 }
 
-// 쇼핑몰별 가격 패턴
-function extractPriceMall(html, mall) {
-  const patterns = {
-    oliveyoung: [
-      /class="[^"]*price-2[^"]*"[^>]*>[\s\S]{0,300}?(\d{1,3}(?:,\d{3})+)\s*원/i,
-      /판매가[\s\S]{0,200}?(\d{1,3}(?:,\d{3})+)\s*원/i,
-    ],
-    coupang: [
-      /"sellerPrice"\s*:\s*(\d+)/,
-      /class="[^"]*total-price[^"]*"[^>]*>[\s\S]{0,100}?(\d{1,3}(?:,\d{3})+)/i,
-      /"salePrice"\s*:\s*(\d+)/,
-    ],
-    musinsa: [
-      /"price"\s*:\s*(\d+)/,
-      /class="[^"]*price[^"]*"[^>]*>[\s\S]{0,100}?(\d{1,3}(?:,\d{3})+)\s*원/i,
-    ],
-    kurly: [
-      /"price"\s*:\s*(\d+)/,
-      /class="[^"]*price[^"]*"[^>]*>[\s\S]{0,100}?(\d{1,3}(?:,\d{3})+)/i,
-    ],
-    naver: [
-      /"price"\s*:\s*(\d+)/,
-      /discountedSalePrice[^:]*:\s*(\d+)/,
-    ],
-    default: [
-      /판매가[\s\S]{0,200}?(\d{1,3}(?:,\d{3})+)\s*원/i,
-      /"price"\s*:\s*(\d+)/,
-      /"salePrice"\s*:\s*(\d+)/,
-      /(\d{1,3}(?:,\d{3})+)\s*원[\s\S]{0,50}?장바구니/i,
-      /class="[^"]*price[^"]*"[^>]*>[\s\S]{0,100}?(\d{1,3}(?:,\d{3})+)/i,
-    ],
-  };
+// 일반 페이지 크롤링 (다른 쇼핑몰)
+async function fetchGeneric(url) {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+        'Accept-Language': 'ko-KR,ko;q=0.9',
+      }
+    });
+    const html = await res.text();
 
-  const mallPatterns = [...(patterns[mall] || []), ...patterns.default];
-  for (const p of mallPatterns) {
-    const m = html.match(p);
-    if (m?.[1]) {
-      const v = parseInt(m[1].replace(/,/g,''));
-      if (v > 0 && v < 10000000) return v;
+    // OG 태그에서 추출
+    const nameMatch = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/) ||
+                      html.match(/<title>([^<|–-]+)/);
+    const priceMatch = html.match(/<meta[^>]+property="product:price:amount"[^>]+content="([^"]+)"/) ||
+                       html.match(/"price"\s*:\s*"?(\d+)"?/);
+    const imgMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/);
+
+    // JSON-LD에서 추출
+    const jsonLdMatch = html.match(/<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/);
+    let jsonPrice = 0, jsonName = null, jsonImage = null;
+    if (jsonLdMatch) {
+      try {
+        const ld = JSON.parse(jsonLdMatch[1]);
+        jsonName = ld.name || null;
+        jsonPrice = parseInt(ld.offers?.price || ld.price || 0);
+        jsonImage = ld.image || null;
+      } catch(e) {}
+    }
+
+    const name = jsonName || (nameMatch ? nameMatch[1].trim() : null);
+    const price = jsonPrice || (priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0);
+    const image = jsonImage || (imgMatch ? imgMatch[1] : null);
+
+    // 무게 추출
+    let weightG = null;
+    const weightMatch = html.match(/(\d+(?:\.\d+)?)\s*(ml|g|ML|G)(?:\s*[,\/]|\s*$)/i);
+    if (weightMatch) weightG = parseFloat(weightMatch[1]);
+
+    return { name, price, image, weightG, source: 'generic' };
+  } catch(e) {
+    return { name: null, price: 0, image: null, weightG: null, source: 'failed' };
+  }
+}
+
+// 환율 가져오기
+async function getExchangeRate() {
+  try {
+    const res = await fetch('https://open.er-api.com/v6/latest/KRW');
+    const data = await res.json();
+    return data?.rates?.VND || CONFIG.fallbackRate;
+  } catch(e) {
+    return CONFIG.fallbackRate;
+  }
+}
+
+// 무게 추정
+function estimateWeight(name, category, weightG) {
+  if (weightG && weightG > 0) return { g: weightG + CONFIG.packagingG, source: '✓ 자동' };
+
+  const text = (name || '').toLowerCase();
+  for (const [key, w] of Object.entries(CATEGORY_WEIGHT)) {
+    if (key !== 'default' && text.includes(key)) {
+      return { g: w + CONFIG.packagingG, source: '≈ 카테고리' };
     }
   }
-  return 0;
+  return { g: CATEGORY_WEIGHT.default + CONFIG.packagingG, source: '≈ 기본값' };
 }
 
-// 무게 자동 추출
-function extractWeight(html) {
-  const patterns = [
-    /중량[\s\S]{0,80}?([0-9,]+\.?[0-9]*)\s*(ml|ML|mL|g|G|kg|KG)/,
-    /용량[\s\S]{0,80}?([0-9,]+\.?[0-9]*)\s*(ml|ML|mL|g|G|kg|KG)/,
-    /내용량[\s\S]{0,80}?([0-9,]+\.?[0-9]*)\s*(ml|ML|mL|g|G|kg|KG)/,
-    /Volume[\s\S]{0,80}?([0-9,]+\.?[0-9]*)\s*(ml|ML|mL|g|G)/i,
-    /"weight"\s*:\s*"?([0-9.]+)"?\s*,?\s*"weightUnit"\s*:\s*"?(g|kg)"?/i,
-    /\b([0-9]+)\s*(ml|ML|mL)\b/,
-    /\b([0-9]+)\s*g\b(?!\s*[이가을를은])/,
-  ];
-  for (const p of patterns) {
-    const m = html.match(p);
-    if (!m) continue;
-    const val  = parseFloat(m[1].replace(/,/g,''));
-    const unit = (m[2]||'g').toLowerCase();
-    if (val <= 0 || val > 5000) continue;
-    let g = 0;
-    if (unit==='ml'||unit==='l'&&val<10) g = Math.round(val + CONFIG.packagingG);
-    else if (unit==='g')                  g = Math.round(val + CONFIG.packagingG);
-    else if (unit==='kg')                 g = Math.round(val*1000 + CONFIG.packagingG);
-    if (g > 0) return { weight: g, source: 'auto', raw: `${val}${unit}` };
-  }
-  return null;
-}
-
-// 카테고리 키워드로 기본 무게 추정
-function guessWeightFromContent(name, url) {
-  const text = (name + url).toLowerCase();
-  for (const [key, w] of Object.entries(CATEGORY_WEIGHT)) {
-    if (key !== 'default' && text.includes(key)) return { weight: w, source: 'category' };
-  }
-  return { weight: CATEGORY_WEIGHT.default, source: 'default' };
-}
-
+// 메인 핸들러
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ error: '상품 URL을 입력해주세요' });
-
-  // 한국 쇼핑몰인지 확인
-  const KOREAN_MALLS = ['oliveyoung','coupang','musinsa','kurly','zigzag','ably','29cm','gmarket','auction','11st','naver','shopping','smartstore','daiso','lohb','sivillage'];
-  const isKorean = KOREAN_MALLS.some(m => url.includes(m));
-  if (!isKorean) {
-    return res.status(400).json({
-      error: '한국 쇼핑몰 링크를 입력해주세요',
-      errorVn: 'Vui lòng nhập link từ cửa hàng Hàn Quốc',
-      supportedMalls: '올리브영, 쿠팡, 무신사, 마켓컬리, 지그재그, 에이블리, 29CM, G마켓 등'
-    });
-  }
-
-  const mall = detectMall(url);
+  const { url, qty = 1 } = req.query;
+  if (!url) return res.status(400).json({ error: 'url 파라미터가 필요합니다' });
 
   try {
-    // ── 1. 페이지 fetch ──
-    const pageRes = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
-        'Referer': new URL(url).origin + '/',
-      }
-    });
-    const html = await pageRes.text();
+    const mall = detectMall(url);
 
-    // ── 2. 상품 정보 추출 (우선순위: JSON-LD → OG 메타 → 몰별 패턴) ──
-    let name = '', krwPrice = 0, image = '';
+    // 쇼핑몰별 데이터 가져오기
+    let productData;
+    if (mall === 'oliveyoung') {
+      productData = await fetchOliveyoung(url);
+    } else {
+      productData = await fetchGeneric(url);
+    }
 
-    // JSON-LD (가장 신뢰성 높음)
-    const ldData = extractFromJsonLd(html);
-    if (ldData) { name = ldData.name; krwPrice = ldData.price; image = ldData.image; }
+    const { name, price, image, weightG, source, goodsNo } = productData;
+    const quantity = parseInt(qty) || 1;
 
-    // OG 메타
-    const og = extractOgMeta(html);
-    if (!name)     name     = og.title;
-    if (!krwPrice) krwPrice = og.price;
-    if (!image)    image    = og.image;
+    // 환율
+    const exchangeRate = await getExchangeRate();
 
-    // 몰별 패턴
-    if (!krwPrice) krwPrice = extractPriceMall(html, mall);
+    // 무게 계산
+    const weight = estimateWeight(name, mall, weightG);
+    const totalWeightKg = (weight.g * quantity) / 1000;
 
-    // 이미지 정리
-    if (image && image.startsWith('//')) image = 'https:' + image;
+    // 금액 계산
+    const productTotal = price * quantity;
+    const shippingKRW = Math.round(totalWeightKg * CONFIG.shippingPerKg);
+    const commissionKRW = Math.round(productTotal * CONFIG.commission);
+    const totalKRW = productTotal + shippingKRW + commissionKRW;
+    const totalVND = Math.round(totalKRW * exchangeRate);
+    const minVND = 10000;
 
-    // ── 3. 무게 추출 ──
-    const weightResult = extractWeight(html) || guessWeightFromContent(name, url);
-
-    // ── 4. 실시간 환율 ──
-    let exchangeRate = CONFIG.fallbackRate;
-    try {
-      const r = await fetch('https://open.er-api.com/v6/latest/KRW');
-      const d = await r.json();
-      if (d?.rates?.VND) exchangeRate = d.rates.VND;
-    } catch (_) {}
-
-    // ── 5. 쇼핑몰 이름 ──
-    const mallNames = {
-      oliveyoung:'올리브영', coupang:'쿠팡', musinsa:'무신사',
-      kurly:'마켓컬리', zigzag:'지그재그', ably:'에이블리',
-      '29cm':'29CM', gmarket:'G마켓', auction:'옥션',
-      '11st':'11번가', naver:'네이버쇼핑', daiso:'다이소', other:'한국 쇼핑몰'
-    };
-
-    return res.json({
+    res.status(200).json({
       success: true,
-      mall: { id: mall, name: mallNames[mall] || '한국 쇼핑몰' },
-      product: { name: name || '(제품명 조회 실패)', image, krwPrice, url },
+      mall,
+      product: {
+        name: name || '상품명을 가져올 수 없습니다',
+        price,
+        image,
+        url,
+        goodsNo: goodsNo || null,
+        weightSource: source,
+      },
       weight: {
-        grams: weightResult.weight,
-        source: weightResult.source,
-        raw: weightResult.raw || null,
+        perItemG: weight.g,
+        totalKg: Math.round(totalWeightKg * 1000) / 1000,
+        source: weight.source,
+      },
+      calculation: {
+        quantity,
+        productKRW: productTotal,
+        shippingKRW,
+        commissionKRW,
+        totalKRW,
+        exchangeRate,
+        totalVND: Math.max(totalVND, minVND),
       },
       config: {
         shippingPerKg: CONFIG.shippingPerKg,
-        commission: CONFIG.commission,
-      },
-      exchangeRate: Math.round(exchangeRate * 100) / 100,
+        commissionRate: CONFIG.commission,
+      }
     });
 
-  } catch (err) {
-    return res.status(500).json({
-      error: '상품 정보를 가져오는 데 실패했습니다',
-      errorVn: 'Không thể lấy thông tin sản phẩm',
-      details: err.message
-    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
   }
 }
