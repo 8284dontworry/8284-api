@@ -46,6 +46,9 @@ export default async function handler(req, res) {
     if (!Array.isArray(items) || items.length === 0)
       return res.status(400).json({ error: "주문 상품이 없음" });
 
+    // 고객명 (제목 자동화 = 날짜_고객명 에서 사용됨)
+    const buyerName = customer.name || customer.email;
+
     // 청구 통화 변환 (KRW 모드면 원화 그대로, VND 모드면 환율 적용)
     const r = Number(rate) || 0;
     const charge = (krw) =>
@@ -88,8 +91,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // ── 3) 배송 라인 (★서버에서 무게로 직접 계산 — 프론트 shipKrw에 의존 X) ──
-    //   무게는 각 아이템 weightG 합산값(= (용량 + 포장300g) × 수량).
+    // ── 3) 배송 라인 (서버에서 무게로 직접 계산) ──
     const totalShipKrw = Math.round((totalWeightG / 1000) * CONFIG.shipPerKg);
     if (totalShipKrw > 0) {
       line_items.push({
@@ -103,7 +105,7 @@ export default async function handler(req, res) {
 
     // ── 4) note (관리자 확정용) ──
     const noteLines = [
-      `■ 고객: ${customer.name || "-"}`,
+      `■ 고객: ${buyerName}`,
       `■ 연락처: ${customer.phone || "-"}`,
       `■ 배송지: ${customer.address || "-"}`,
       `■ 적용환율: 1 KRW = ${r} VND`,
@@ -123,6 +125,14 @@ export default async function handler(req, res) {
       "※ 한화단가/무게 검증 후 [인보이스 보내기] 클릭",
     ];
 
+    // ── 주소 객체 (★ first_name 항상 채움 → 인보이스 제목에서 고객명 사용) ──
+    const addr = {
+      first_name: buyerName,
+      country_code: "VN",
+      ...(customer.address ? { address1: customer.address } : {}),
+      ...(customer.phone ? { phone: customer.phone } : {}),
+    };
+
     // ── 5) Draft Order 생성 ──
     const payload = {
       draft_order: {
@@ -130,16 +140,8 @@ export default async function handler(req, res) {
         email: customer.email,
         note: noteLines.join("\n"),
         tags: CONFIG.tags,
-        ...(customer.address
-          ? {
-              shipping_address: {
-                address1: customer.address,
-                name: customer.name || customer.email,
-                phone: customer.phone || "",
-                country_code: "VN",
-              },
-            }
-          : {}),
+        shipping_address: addr,
+        billing_address: addr,
       },
     };
 
