@@ -1,14 +1,33 @@
 // api/calculate.js
 // 8284 Don't Worry — 한국 전체 쇼핑몰 가격+무게 자동 계산 API
-// 🖊 배송비 정책 변경 시 CONFIG만 수정하세요
+// ※ 배송단가·수수료·포장무게는 이제 /api/config (단일 소스)에서 읽습니다.
+//   환율은 /api/fx (단일 소스)에서 읽습니다.
+//   → 정책 변경은 API/config.js / API/fx.js '한 곳'에서만. (이 파일은 수정 불필요)
 
-const CONFIG = {
-  shippingPerKg: 12000,  // KG당 배송비 (원)
-  commission:    0.05,   // 수수료 5%
-  maxWeightKg:   10,     // 최대 주문 무게
-  fallbackRate:  17.5,   // 환율 기본값 (KRW→VND)
-  packagingG:    40,     // 포장재 무게 (g)
+// 네트워크 실패 시에만 쓰는 비상 폴백 (평상시엔 /api/config 값으로 덮어씀)
+const FALLBACK = {
+  shippingPerKg: 12000,
+  commission:    0.05,
+  maxWeightKg:   30,
+  fallbackRate:  17.5,
+  packagingG:    300,
 };
+
+// 단일 소스에서 비즈니스 상수 읽기
+async function getConfig() {
+  try {
+    const res = await fetch('https://8284-api.vercel.app/api/config');
+    const c = await res.json();
+    return {
+      shippingPerKg: Number(c.shipPerKg)  || FALLBACK.shippingPerKg,
+      commission:    Number(c.commission) || FALLBACK.commission,
+      maxWeightKg:   Number(c.maxKg)      || FALLBACK.maxWeightKg,
+      packagingG:    Number(c.packagingG) || FALLBACK.packagingG,
+    };
+  } catch(e) {
+    return { ...FALLBACK };
+  }
+}
 
 // 카테고리별 기본 무게
 const CATEGORY_WEIGHT = {
@@ -173,23 +192,23 @@ async function getExchangeRate() {
   try {
     const res = await fetch('https://8284-api.vercel.app/api/fx');
     const data = await res.json();
-    return data?.rate || CONFIG.fallbackRate;
+    return data?.rate || FALLBACK.fallbackRate;
   } catch(e) {
-    return CONFIG.fallbackRate;
+    return FALLBACK.fallbackRate;
   }
 }
 
-// 무게 추정
-function estimateWeight(name, category, weightG) {
-  if (weightG && weightG > 0) return { g: weightG + CONFIG.packagingG, source: '✓ 자동' };
+// 무게 추정 (포장무게는 단일 소스 값 사용)
+function estimateWeight(name, category, weightG, packagingG) {
+  if (weightG && weightG > 0) return { g: weightG + packagingG, source: '✓ 자동' };
 
   const text = (name || '').toLowerCase();
   for (const [key, w] of Object.entries(CATEGORY_WEIGHT)) {
     if (key !== 'default' && text.includes(key)) {
-      return { g: w + CONFIG.packagingG, source: '≈ 카테고리' };
+      return { g: w + packagingG, source: '≈ 카테고리' };
     }
   }
-  return { g: CATEGORY_WEIGHT.default + CONFIG.packagingG, source: '≈ 기본값' };
+  return { g: CATEGORY_WEIGHT.default + packagingG, source: '≈ 기본값' };
 }
 
 // 메인 핸들러
@@ -204,6 +223,9 @@ export default async function handler(req, res) {
   if (!url) return res.status(400).json({ error: 'url 파라미터가 필요합니다' });
 
   try {
+    // 단일 소스에서 비즈니스 상수 받기
+    const CONFIG = await getConfig();
+
     const mall = detectMall(url);
 
     // 쇼핑몰별 데이터 가져오기
@@ -220,8 +242,8 @@ export default async function handler(req, res) {
     // 환율
     const exchangeRate = await getExchangeRate();
 
-    // 무게 계산
-    const weight = estimateWeight(name, mall, weightG);
+    // 무게 계산 (포장무게도 단일 소스 값)
+    const weight = estimateWeight(name, mall, weightG, CONFIG.packagingG);
     const totalWeightKg = (weight.g * quantity) / 1000;
 
     // 금액 계산
@@ -260,6 +282,7 @@ export default async function handler(req, res) {
       config: {
         shippingPerKg: CONFIG.shippingPerKg,
         commissionRate: CONFIG.commission,
+        packagingG: CONFIG.packagingG,
       }
     });
 
