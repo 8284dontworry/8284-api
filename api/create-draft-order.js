@@ -2,6 +2,7 @@
 // 8284 Don't Worry — 주문페이지 제출 → Shopify Draft Order 생성
 // 페이지가 이미 계산한 값(한화 기준)을 그대로 받아 라인아이템으로 변환.
 // 엔드포인트: https://8284-api.vercel.app/api/create-draft-order
+// ※ 배송단가(shipPerKg)는 /api/config (단일 소스)에서 읽습니다. (이 파일 수정 불필요)
 
 const CONFIG = {
   shopDomain: process.env.SHOPIFY_STORE_DOMAIN || "8284dontworry.myshopify.com",
@@ -12,8 +13,8 @@ const CONFIG = {
   //   나중에 스토어 기본통화를 VND로 바꾸면 "VND"로만 변경.
   storeCurrency: "KRW", // "KRW" | "VND"
 
-  // ★ 국제배송 단가 (₩/kg). 페이지 계산과 동일하게 맞출 것.
-  shipPerKg: 12000,
+  // 비상 폴백 배송단가 (₩/kg). 평상시엔 /api/config 값으로 덮어씀.
+  shipPerKgFallback: 12000,
 
   allowedOrigins: [
     "https://8284dontworry.com",
@@ -22,6 +23,17 @@ const CONFIG = {
   ],
   tags: "korean-shopping,pending-confirm",
 };
+
+// 단일 소스에서 배송단가 읽기
+async function getShipPerKg() {
+  try {
+    const res = await fetch("https://8284-api.vercel.app/api/config");
+    const c = await res.json();
+    return Number(c.shipPerKg) || CONFIG.shipPerKgFallback;
+  } catch (e) {
+    return CONFIG.shipPerKgFallback;
+  }
+}
 
 function setCors(req, res) {
   const origin = req.headers.origin;
@@ -45,6 +57,9 @@ export default async function handler(req, res) {
     if (!customer.email) return res.status(400).json({ error: "고객 이메일 필수" });
     if (!Array.isArray(items) || items.length === 0)
       return res.status(400).json({ error: "주문 상품이 없음" });
+
+    // 배송단가 (단일 소스)
+    const shipPerKg = await getShipPerKg();
 
     // 고객명 (제목 자동화 = 날짜_고객명 에서 사용됨)
     const buyerName = customer.name || customer.email;
@@ -91,8 +106,8 @@ export default async function handler(req, res) {
       });
     }
 
-    // ── 3) 배송 라인 (서버에서 무게로 직접 계산) ──
-    const totalShipKrw = Math.round((totalWeightG / 1000) * CONFIG.shipPerKg);
+    // ── 3) 배송 라인 (서버에서 무게로 직접 계산, 단가는 단일 소스) ──
+    const totalShipKrw = Math.round((totalWeightG / 1000) * shipPerKg);
     if (totalShipKrw > 0) {
       line_items.push({
         title: `Phí vận chuyển · 국제배송비 (${(totalWeightG / 1000).toFixed(2)}kg)`,
@@ -111,7 +126,7 @@ export default async function handler(req, res) {
       `■ 적용환율: 1 KRW = ${r} VND`,
       `■ 청구통화: ${CONFIG.storeCurrency}`,
       `■ 총무게(포장포함): ${(totalWeightG / 1000).toFixed(2)} kg`,
-      `■ 배송비: ${totalShipKrw.toLocaleString()}원 (${CONFIG.shipPerKg.toLocaleString()}원/kg)`,
+      `■ 배송비: ${totalShipKrw.toLocaleString()}원 (${shipPerKg.toLocaleString()}원/kg)`,
       "",
       "■ 요청 상품:",
       ...items.map(
