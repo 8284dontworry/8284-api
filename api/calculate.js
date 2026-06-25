@@ -165,12 +165,15 @@ async function fetchGeneric(url) {
   }
 }
 
-// 환율 가져오기
+// 환율 가져오기 — 단일 소스(/api/fx)에서 읽음
+// ※ 랜딩 환율 카드 / 주문(create-draft-order)과 동일한 값을 보장하기 위해
+//   여기서 직접 외부 API를 부르지 않고, Vercel의 /api/fx 한 곳만 호출합니다.
+//   환율 소스나 폴백을 바꾸려면 API/fx.js '한 파일만' 수정하면 됩니다.
 async function getExchangeRate() {
   try {
-    const res = await fetch('https://open.er-api.com/v6/latest/KRW');
+    const res = await fetch('https://8284-api.vercel.app/api/fx');
     const data = await res.json();
-    return data?.rates?.VND || CONFIG.fallbackRate;
+    return data?.rate || CONFIG.fallbackRate;
   } catch(e) {
     return CONFIG.fallbackRate;
   }
